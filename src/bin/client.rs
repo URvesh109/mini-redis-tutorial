@@ -1,11 +1,20 @@
 use bytes::Bytes;
 use mini_redis::client;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
+
+type Responder<T> = oneshot::Sender<mini_redis::Result<T>>;
 
 #[derive(Debug)]
 enum Command {
-    Get { key: String },
-    Set { key: String, val: Bytes },
+    Get {
+        key: String,
+        resp: Responder<Option<Bytes>>,
+    },
+    Set {
+        key: String,
+        val: Bytes,
+        resp: Responder<()>,
+    },
 }
 
 #[tokio::main]
@@ -19,13 +28,13 @@ async fn main() {
             use Command::*;
 
             match cmd {
-                Get { key } => {
-                    let result = client.get(&key).await.unwrap();
-                    println!("Get result {:?}", result);
+                Get { key, resp } => {
+                    let res = client.get(&key).await;
+                    let _ = resp.send(res);
                 }
-                Set { key, val } => {
-                    let result = client.set(&key, val).await.unwrap();
-                    println!("Set result {:?}", result);
+                Set { key, val, resp } => {
+                    let result = client.set(&key, val).await;
+                    let _ = resp.send(result);
                 }
             }
         }
@@ -34,20 +43,28 @@ async fn main() {
     let tx2 = tx.clone();
 
     let t1 = tokio::spawn(async move {
-        println!("Send get command");
+        let (resp_tx, resp_rx) = oneshot::channel();
         let cmd = Command::Get {
             key: "foo".to_string(),
+            resp: resp_tx,
         };
         tx.send(cmd).await.unwrap();
+
+        let res = resp_rx.await.unwrap();
+        println!("Got {:?}", res);
     });
 
     let t2 = tokio::spawn(async move {
-        println!("Send set command");
+        let (resp_tx, resp_rx) = oneshot::channel();
         let cmd = Command::Set {
             key: "foo".to_string(),
             val: "bar".into(),
+            resp: resp_tx,
         };
         tx2.send(cmd).await.unwrap();
+
+        let res = resp_rx.await.unwrap();
+        println!("Got {:?}", res);
     });
 
     t1.await.unwrap();
